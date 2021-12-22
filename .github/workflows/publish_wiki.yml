@@ -1,0 +1,96 @@
+# This workflow will publish all of the documents stored under ./github/wiki directory 
+# to Github Wiki of the given repository.
+#
+# To use this workflow, please follow these steps
+# - Setup the Github Wiki by following this official guide
+# https://docs.github.com/en/communities/documenting-your-project-with-wikis/adding-or-editing-wiki-pages#adding-wiki-pages
+# - Create Personal Access Token with `repo` scope enabled - a bot account is recommended to generate that token
+# https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/creating-a-personal-access-token
+# - Create a Repository Secret for the above token, e.g. name it as GH_WIKI_ACTION_TOKEN
+# - Define your own workflow and provide the required inputs & secret, here is an example workflow:
+# 
+# name: Publish Wiki
+#
+# on: 
+#   push:
+#     branches:
+#       - develop
+#     paths:
+#       - .github/wiki/**
+#
+# jobs:
+#   publish:
+#     name: Publish Wiki
+#     uses: nimblehq/github-actions-workflows/.github/workflows/publish_wiki.yml@feature/publish-wiki-workflow
+#     with:
+#       USER_NAME: github-wiki-action
+#       USER_EMAIL: github-wiki-action@example.com
+#     secrets:
+#       USER_TOKEN: ${{ secrets.GH_WIKI_ACTION_TOKEN }}
+
+name: Publish Wiki
+
+on:
+  workflow_call:
+    inputs:
+      # The username of a Github (bot) account
+      USER_NAME:
+        required: true
+        type: string
+      # The e-mail of a Github (bot) account
+      USER_EMAIL:
+        required: true
+        type: string
+    secrets:
+      # The Personal Access Token of a Github (bot) account
+      USER_TOKEN:
+        required: true
+
+env:
+  USER_NAME: ${{ inputs.USER_NAME }}
+  USER_EMAIL: ${{ inputs.USER_EMAIL }}
+  USER_TOKEN: ${{ secrets.USER_TOKEN }}
+  REPOSITORY: ${{ github.repository }}
+  WIKI_FOLDER: .github/wiki
+  TEMP_CLONE_WIKI_FOLDER: tmp_wiki
+
+jobs:
+  publish:
+    name: Publish Github Wiki
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+
+    steps:
+      - name: Cancel previous runs
+        uses: styfle/cancel-workflow-action@0.8.0
+        with:
+          access_token: ${{ github.token }}
+
+      - name: Checkout the repository
+        uses: actions/checkout@v2
+        with:
+          ref: ${{ github.head_ref }}
+
+      # This step will
+      # - Create folder named `tmp_wiki`
+      # - Initialize Git
+      # - Pull old Wiki content
+      - name: Pull current wiki content
+        run: |
+          mkdir $TEMP_CLONE_WIKI_FOLDER
+          cd $TEMP_CLONE_WIKI_FOLDER
+          git init
+          git config user.name $USER_NAME
+          git config user.email $USER_EMAIL
+          git pull https://$USER_TOKEN@github.com/$REPOSITORY.wiki.git
+
+      # This step will
+      # - Synchronize differences between `.github/wiki/` & `tmp_wiki`
+      # - Push new Wiki content
+      - name: Push new wiki content
+        run: |
+          rsync -av --delete $WIKI_FOLDER/ $TEMP_CLONE_WIKI_FOLDER/ --exclude .git
+          cd $TEMP_CLONE_WIKI_FOLDER
+          git add .
+          git commit -m "Update Wiki content"
+          git push -f --set-upstream https://$USER_TOKEN@github.com/$REPOSITORY.wiki.git master
