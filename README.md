@@ -1,12 +1,20 @@
-# Git Repository Template
+<p align="center">
+  <img alt="Nimble logo" src="https://assets.nimblehq.co/logo/light/logo-light-text-320.png" />
+</p>
 
-Project repository template to set up all public projects at [Nimble](https://nimblehq.co/)
+<p align="center">
+  <strong>A collection of reusable Github Actions Workflows at Nimble</strong>
+</p>
 
+---
 ## Usage
+Follow the [instruction](https://docs.github.com/en/actions/learn-github-actions/reusing-workflows#calling-a-reusable-workflow) from Github to use any workflows in this repository.
 
-Clone the repository
-
-`git clone git@github.com:nimblehq/git-template.git`
+## How to contribute
+- Refer to the [official guide](https://docs.github.com/en/actions/learn-github-actions/reusing-workflows#creating-a-reusable-workflow) to learn how to define a resuable workflow
+- Put the new workflow under `./github/workflows` directory
+- Follow our [convention](https://nimblehq.co/compass/development/code-conventions/github-actions/) when defining the workflow
+- Submit a [Pull rquest](https://github.com/nimblehq/github-actions-workflows/compare) to this repository
 
 ## License
 
