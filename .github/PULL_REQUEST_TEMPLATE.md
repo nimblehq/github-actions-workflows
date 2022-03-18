@@ -10,4 +10,4 @@ Describe in detail how to test the changes, which solution you tried but did not
 
 ## Proof Of Work 📹
 
-Show us the implementation: screenshots, GIT, etc.
+Show us the implementation: screenshots, GIFs, etc.
