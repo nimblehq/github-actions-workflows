@@ -1,0 +1,41 @@
+# This workflow works on a pull request (PR) to rebase a branch againts the base branch 
+# when there is a new comment "/rebase" on the PR.
+#
+# e.g. given a PR from branch A -> branch B
+# if a user type a comment "/rebase" on the PR, this workflow will rebase the branch A against the banch B.
+#
+# To use this workflow, simply define your own workflow to call this workflow, here is an example:
+# ---
+# name: Rebase
+#
+# on:
+#   issue_comment:
+#     types: [created]
+#
+# jobs:
+#   publish:
+#     name: Rebase
+#     uses: nimblehq/github-actions-workflows/.github/workflows/rebase.yml@0.1.0
+
+name: Rebase
+
+on: 
+  workflow_call:
+
+jobs:
+  rebase:
+    name: Rebase
+    if: {{ github.event.issue.pull_request != '' && contains(github.event.comment.body, '/rebase') }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout the repository
+        uses: actions/checkout@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth:
+
+      - name: Rebase automatically
+        uses: cirrus-actions/rebase@1.5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
