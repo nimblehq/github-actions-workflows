@@ -1,4 +1,4 @@
-# This workflow will publish all of the documents stored under ./github/wiki directory 
+# This workflow will publish all of the documents stored under ./github/wiki directory
 # to Github Wiki of the given repository.
 #
 # To use this workflow, please follow these steps
@@ -7,11 +7,11 @@
 # - Create Personal Access Token with `repo` scope enabled - a bot account is recommended to generate that token
 # https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/creating-a-personal-access-token
 # - Create a Repository Secret for the above token, e.g. name it as GH_ACTION_TOKEN
-# - Define your own workflow and provide the required inputs & secret, here is an example workflow:
-# 
+# - Define your own workflow and provide the required inputs & secrets, here is an example workflow:
+#
 # name: Publish Wiki
 #
-# on: 
+# on:
 #   push:
 #     branches:
 #       - develop

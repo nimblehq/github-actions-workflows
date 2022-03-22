@@ -11,7 +11,7 @@
 Follow the [instruction](https://docs.github.com/en/actions/learn-github-actions/reusing-workflows#calling-a-reusable-workflow) from Github to use any workflows in this repository.
 
 ## How to contribute
-- Refer to the [official guide](https://docs.github.com/en/actions/learn-github-actions/reusing-workflows#creating-a-reusable-workflow) to learn how to define a resuable workflow
+- Refer to the [official guide](https://docs.github.com/en/actions/learn-github-actions/reusing-workflows#creating-a-reusable-workflow) to learn how to define a reusable workflow
 - Put the new workflow under `./github/workflows` directory
 - Follow our [convention](https://nimblehq.co/compass/development/code-conventions/github-actions/) when defining the workflow
 - Submit a [Pull rquest](https://github.com/nimblehq/github-actions-workflows/compare) to this repository
