@@ -1,0 +1,55 @@
+name: Automate creating the Release pull request
+description: Automate creating the Release pull request
+inputs:
+  version:
+    description: Current release version
+    required: true
+  base_branch:
+    description: The base branch for the release pull request
+    required: true
+  assignee:
+    description: The assignee username, e.g. bot-nimble
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Find HEAD commit
+      id: head
+      run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+    - name: Build changelog
+      id: changelog
+      uses: mikepenz/release-changelog-builder-action@v4
+      with:
+        configuration: ".github/workflows/changelog-config.json"
+        # Listing PRs from the last tag to the HEAD commit
+        toTag: ${{ steps.head.outputs.sha }}
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Create the Release pull request
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        HEAD_BRANCH=release/${{ inputs.version }}
+
+        # Fetch milestone info
+        gh extension install valeriobelli/gh-milestone
+        MILESTONE=${{ inputs.version }}
+        MILESTONE_URL=$(gh milestone list --query $MILESTONE --json url --jq ".[0].url")
+
+        # Create the release branch
+        git checkout -b $HEAD_BRANCH
+        git push origin $HEAD_BRANCH
+
+        # Create the pull request
+        gh pr create \
+          --base ${{ inputs.base_branch }} \
+          --head $HEAD_BRANCH \
+          --assignee ${{ inputs.version }} \
+          --title "Release - ${{ inputs.version }}" \
+          --label 'type : release' \
+          --milestone $MILESTONE \
+          --body "$MILESTONE_URL
+
+          ${{ steps.changelog.outputs.changelog }}" \
