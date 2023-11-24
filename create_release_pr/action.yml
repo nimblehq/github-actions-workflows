@@ -1,11 +1,17 @@
 name: Automate creating the Release pull request
 description: Automate creating the Release pull request
 inputs:
+  token:
+    description: The GitHub PAT for this action to use
+    required: true
   version:
     description: Current release version
     required: true
   base_branch:
     description: The base branch for the release pull request
+    required: true
+  changelogConfiguration:
+    description: The changelog configuration file path, e.g., ".github/workflows/config/changelog-release.json"
     required: true
   assignee:
     description: The assignee username, e.g. bot-nimble
@@ -16,20 +22,22 @@ runs:
   steps:
     - name: Find HEAD commit
       id: head
+      shell: bash
       run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
     - name: Build changelog
       id: changelog
       uses: mikepenz/release-changelog-builder-action@v4
       with:
-        configuration: ".github/workflows/changelog-config.json"
+        configuration: ${{ inputs.changelogConfiguration }}
         # Listing PRs from the last tag to the HEAD commit
         toTag: ${{ steps.head.outputs.sha }}
-        token: ${{ secrets.GITHUB_TOKEN }}
+        token: ${{ inputs.token }}
 
     - name: Create the Release pull request
       env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GH_TOKEN: ${{ inputs.token }}
+      shell: bash
       run: |
         HEAD_BRANCH=release/${{ inputs.version }}
 
