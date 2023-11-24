@@ -1,0 +1,70 @@
+name: Automate creating the Release pull request
+description: Automate creating the Release pull request
+inputs:
+  version:
+    description: Current release version
+    required: true
+  token:
+    description: The GitHub PAT for this action to use
+    required: false
+    default: ${{ github.token }}
+  base_branch:
+    description: The base branch for the release pull request, e.g., "main"
+    required: false
+    default: main
+  changelogConfiguration:
+    description: The changelog configuration file path, e.g., ".github/workflows/config/changelog-release.json"
+    required: true
+  assignee:
+    description: The assignee for the Release pull request, e.g., bot-nimble
+    required: false
+    default: 'bot-nimble'
+  label:
+    description: 'The label for the Release pull request, e.g., "type : release"'
+    required: false
+    default: 'type : release'
+
+runs:
+  using: composite
+  steps:
+    - name: Find HEAD commit
+      id: head
+      shell: bash
+      run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+    - name: Build changelog
+      id: changelog
+      uses: mikepenz/release-changelog-builder-action@v4
+      with:
+        configuration: ${{ inputs.changelogConfiguration }}
+        # Listing PRs from the last tag to the HEAD commit
+        toTag: ${{ steps.head.outputs.sha }}
+        token: ${{ inputs.token }}
+
+    - name: Create the Release pull request
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      shell: bash
+      run: |
+        RELEASE_BRANCH=release/${{ inputs.version }}
+
+        # Fetch milestone info
+        gh extension install valeriobelli/gh-milestone
+        MILESTONE=${{ inputs.version }}
+        MILESTONE_URL=$(gh milestone list --query $MILESTONE --json url --jq ".[0].url")
+
+        # Create the release branch
+        git checkout -b $RELEASE_BRANCH
+        git push origin $RELEASE_BRANCH -f
+
+        # Create the pull request
+        gh pr create \
+          --base ${{ inputs.base_branch }} \
+          --head $RELEASE_BRANCH \
+          --assignee ${{ inputs.assignee }} \
+          --title "Release - ${{ inputs.version }}" \
+          --label "${{ inputs.label }}" \
+          --milestone $MILESTONE \
+          --body "$MILESTONE_URL
+
+          ${{ steps.changelog.outputs.changelog }}" \
