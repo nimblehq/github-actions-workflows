@@ -48,13 +48,13 @@ runs:
 
         # Create the release branch
         git checkout -b $HEAD_BRANCH
-        git push origin $HEAD_BRANCH
+        git push origin $HEAD_BRANCH -f
 
         # Create the pull request
         gh pr create \
           --base ${{ inputs.base_branch }} \
           --head $HEAD_BRANCH \
-          --assignee ${{ inputs.version }} \
+          --assignee ${{ inputs.assignee }} \
           --title "Release - ${{ inputs.version }}" \
           --label 'type : release' \
           --milestone $MILESTONE \
