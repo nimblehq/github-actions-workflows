@@ -8,13 +8,16 @@ inputs:
     description: Current release version
     required: true
   base_branch:
-    description: The base branch for the release pull request
+    description: The base branch for the release pull request, e.g., "main"
     required: true
   changelogConfiguration:
     description: The changelog configuration file path, e.g., ".github/workflows/config/changelog-release.json"
     required: true
   assignee:
-    description: The assignee username, e.g. bot-nimble
+    description: The assignee username for the Release pull request, e.g. bot-nimble
+    required: true
+  label:
+    description: The label for the Release pull request, e.g. "type : release"
     required: true
 
 runs:
@@ -56,7 +59,7 @@ runs:
           --head $HEAD_BRANCH \
           --assignee ${{ inputs.assignee }} \
           --title "Release - ${{ inputs.version }}" \
-          --label 'type : release' \
+          --label ${{ inputs.label }} \
           --milestone $MILESTONE \
           --body "$MILESTONE_URL
 
