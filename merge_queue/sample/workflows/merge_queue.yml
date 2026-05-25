@@ -15,13 +15,16 @@ jobs:
     if: github.event.label.name == 'mergeme'
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       checks: read
+      statuses: read
       contents: write
       pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.2
         with:
           fetch-depth: 0
+
       - uses: nimblehq/github-actions-workflows/merge_queue@0.2.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
