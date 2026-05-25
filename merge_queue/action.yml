@@ -141,7 +141,7 @@ runs:
 
             # gh pr checks exits 1 when no checks exist — fall back to empty array
             local CHECK_RAW
-            CHECK_RAW=$(gh pr checks "$PR_NUMBER" --repo "$REPO" --json name,state,workflow 2>/dev/null || echo "[]")
+            CHECK_RAW=$(gh pr checks "$PR_NUMBER" --repo "$REPO" --json name,state,workflow || echo "[]")
             CHECK_STATE=$(echo "$CHECK_RAW" | jq -r \
               --arg workflow "$GITHUB_WORKFLOW" \
               '[.[] | select(.workflow != $workflow)] | if length == 0 then "no_checks" elif any(.state | test("^(FAILURE|ERROR|CANCELLED|ACTION_REQUIRED)$")) then "fail" elif all(.state | test("^(SUCCESS|NEUTRAL|SKIPPED)$")) then "pass" else "pending" end')
