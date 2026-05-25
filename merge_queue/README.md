@@ -42,7 +42,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: nimblehq/github-actions-workflows/merge_queue@v1.0.0
+      - uses: nimblehq/github-actions-workflows/merge_queue@0.2.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -93,7 +93,7 @@ To retry, fix the issue and add the `mergeme` label again.
 ## Custom label
 
 ```yaml
-- uses: nimblehq/github-actions-workflows/merge_queue@v1.0.0
+- uses: nimblehq/github-actions-workflows/merge_queue@0.2.0
   with:
     github-token: ${{ secrets.GITHUB_TOKEN }}
     label: "ready-to-merge"

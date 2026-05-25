@@ -47,7 +47,7 @@ runs:
         # Remove label, post failure comment, write output
         dequeue() {
           local pr="$1" msg="$2"
-          gh api "repos/$REPO/issues/$pr/labels/$LABEL" -X DELETE 2>/dev/null || true
+          gh pr edit "$pr" --repo "$REPO" --remove-label "$LABEL" 2>/dev/null || true
           gh pr comment "$pr" --repo "$REPO" --body "$msg" 2>/dev/null || true
           echo "result=failed" >> "$GITHUB_OUTPUT"
         }
@@ -103,12 +103,11 @@ runs:
           echo "::group::Rebasing ${BRANCH} onto ${BASE}"
 
           # Configure git identity for rebase commits
-          git config user.email "merge-queue[bot]@users.noreply.github.com"
-          git config user.name "merge-queue[bot]"
+          git config user.email "nimblehq-merge-queue[bot]@users.noreply.github.com"
+          git config user.name "nimblehq-merge-queue[bot]"
 
           git fetch origin "$BASE" "$BRANCH"
-          git checkout "origin/$BRANCH"
-          git checkout -B "$BRANCH"
+          git checkout -B "$BRANCH" "origin/$BRANCH"
 
           if ! git rebase "origin/$BASE"; then
             git rebase --abort
@@ -120,7 +119,7 @@ runs:
           # Push directly to token URL to ensure the PAT is used (not GITHUB_TOKEN
           # from checkout). PAT pushes trigger workflows; GITHUB_TOKEN pushes don't.
           local PUSH_URL="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
-          if ! git push "$PUSH_URL" "$BRANCH" --force 2>&1; then
+          if ! git push "$PUSH_URL" "$BRANCH" --force-with-lease; then
             echo "::endgroup::"
             dequeue "$PR_NUMBER" "**Merge queue:** failed to push rebased branch. Re-label \`${LABEL}\` to retry."
             return 0
