@@ -32,6 +32,21 @@ outputs:
 runs:
   using: "composite"
   steps:
+    - name: Ensure jq is available
+      shell: bash
+      run: |
+        command -v jq &>/dev/null && exit 0
+        case "${RUNNER_OS:-}" in
+          Windows)
+            mkdir -p "$RUNNER_TEMP/jq-bin"
+            curl -fsSL -o "$RUNNER_TEMP/jq-bin/jq.exe" \
+              "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-windows-amd64.exe"
+            echo "$RUNNER_TEMP/jq-bin" >> "$GITHUB_PATH"
+            ;;
+          Linux)   sudo apt-get install -y jq 2>/dev/null || sudo yum install -y jq ;;
+          macOS)   brew install jq ;;
+        esac
+
     - name: Rebase, wait for CI, squash merge
       id: merge
       shell: bash
