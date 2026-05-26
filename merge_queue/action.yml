@@ -43,12 +43,28 @@ runs:
       run: |
         set -euo pipefail
         REPO="${GITHUB_REPOSITORY}"
+        API_BASE="https://api.github.com"
+
+        api() {
+          local method="$1" path="$2"
+          shift 2
+          curl -s -X "$method" \
+            -H "Authorization: token ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            "${API_BASE}${path}" "$@"
+        }
+
+        urlencode() { printf '%s' "$1" | jq -sRr @uri; }
 
         # Remove label, post failure comment, write output
         dequeue() {
           local pr="$1" msg="$2"
-          gh pr edit "$pr" --repo "$REPO" --remove-label "$LABEL" 2>/dev/null || true
-          gh pr comment "$pr" --repo "$REPO" --body "$msg" 2>/dev/null || true
+          local label_enc
+          label_enc=$(urlencode "$LABEL")
+          api DELETE "/repos/${REPO}/issues/${pr}/labels/${label_enc}" >/dev/null 2>&1 || true
+          api POST "/repos/${REPO}/issues/${pr}/comments" \
+            -d "{\"body\": $(printf '%s' "$msg" | jq -Rs .)}" >/dev/null 2>&1 || true
           echo "result=failed" >> "$GITHUB_OUTPUT"
         }
 
@@ -61,13 +77,13 @@ runs:
           echo "::group::PR #${PR_NUMBER} — checking state"
 
           local PR_JSON STATE MERGEABLE BRANCH TITLE BASE
-          PR_JSON=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
-            --json state,mergeable,headRefName,title,baseRefName)
-          STATE=$(echo "$PR_JSON" | jq -r '.state')
-          MERGEABLE=$(echo "$PR_JSON" | jq -r '.mergeable')
-          BRANCH=$(echo "$PR_JSON" | jq -r '.headRefName')
-          TITLE=$(echo "$PR_JSON" | jq -r '.title')
-          BASE=$(echo "$PR_JSON" | jq -r '.baseRefName')
+          PR_JSON=$(api GET "/repos/${REPO}/pulls/${PR_NUMBER}")
+          # REST API returns lowercase state and boolean/null mergeable — normalise to match original values
+          STATE=$(printf '%s' "$PR_JSON" | jq -r '.state | ascii_upcase')
+          MERGEABLE=$(printf '%s' "$PR_JSON" | jq -r 'if .mergeable == true then "MERGEABLE" elif .mergeable == false then "CONFLICTING" else "UNKNOWN" end')
+          BRANCH=$(printf '%s' "$PR_JSON" | jq -r '.head.ref')
+          TITLE=$(printf '%s' "$PR_JSON" | jq -r '.title')
+          BASE=$(printf '%s' "$PR_JSON" | jq -r '.base.ref')
 
           echo "PR: #${PR_NUMBER} — ${TITLE}"
           echo "Branch: ${BRANCH} → ${BASE}"
@@ -75,7 +91,9 @@ runs:
           echo "::endgroup::"
 
           if [[ "$STATE" != "OPEN" ]]; then
-            gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$LABEL" 2>/dev/null || true
+            local label_enc
+            label_enc=$(urlencode "$LABEL")
+            api DELETE "/repos/${REPO}/issues/${PR_NUMBER}/labels/${label_enc}" >/dev/null 2>&1 || true
             return 0
           fi
 
@@ -89,7 +107,8 @@ runs:
             local i
             for i in 1 2 3; do
               sleep 5
-              MERGEABLE=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json mergeable --jq '.mergeable')
+              MERGEABLE=$(api GET "/repos/${REPO}/pulls/${PR_NUMBER}" | \
+                jq -r 'if .mergeable == true then "MERGEABLE" elif .mergeable == false then "CONFLICTING" else "UNKNOWN" end')
               echo "  Mergeability retry ${i}: ${MERGEABLE}"
               [[ "$MERGEABLE" != "UNKNOWN" ]] && break
             done
@@ -125,11 +144,20 @@ runs:
             return 0
           fi
 
+          # Capture SHA of the rebased commit — used for check-run polling below
+          local PR_SHA
+          PR_SHA=$(git rev-parse HEAD)
+
           echo "Rebased ${BRANCH} onto latest ${BASE}"
           echo "::endgroup::"
 
           # --- 3. Wait for status checks ---
           echo "::group::Waiting for status checks on PR #${PR_NUMBER}"
+
+          # Exclude this workflow's own check suite so we don't wait on ourselves
+          local CURRENT_SUITE_ID
+          CURRENT_SUITE_ID=$(api GET "/repos/${REPO}/actions/runs/${GITHUB_RUN_ID}" | \
+            jq -r '(.check_suite_id // 0) | tostring')
 
           local ELAPSED=0 CHECK_RESULT="pending" CHECK_STATE CHECKS_SEEN="false"
           # Grace period: wait at least this long before treating "no checks" as
@@ -139,27 +167,81 @@ runs:
             sleep "$POLL_INTERVAL"
             ELAPSED=$((ELAPSED + POLL_INTERVAL))
 
-            # gh pr checks exits 1 when no checks exist — fall back to empty array
-            # non-JSON output on failure = real fetch error
-            local CHECK_RAW
-            local CHECK_EXIT=0
-            CHECK_RAW=$(gh pr checks "$PR_NUMBER" --repo "$REPO" --json name,state,workflow 2>&1) || CHECK_EXIT=$?
-            if [[ $CHECK_EXIT -ne 0 ]]; then
-              if [[ -z "$CHECK_RAW" ]]; then
-                CHECK_RAW="[]"
-              elif [[ "$CHECK_RAW" =~ ^\[ ]]; then
-                : # valid JSON array despite non-zero exit
-              else
-                echo "Failed to fetch PR checks: $CHECK_RAW"
-                CHECK_RESULT="fail"
-                break
-              fi
-            fi
-            CHECK_STATE=$(echo "$CHECK_RAW" | jq -r \
-              --arg workflow "$GITHUB_WORKFLOW" \
-              '[.[] | select(.workflow != $workflow)] | if length == 0 then "no_checks" elif any(.state | test("^(FAILURE|ERROR|CANCELLED|ACTION_REQUIRED)$")) then "fail" elif all(.state | test("^(SUCCESS|NEUTRAL|SKIPPED)$")) then "pass" else "pending" end')
+            # Fetch check runs for the rebased commit
+            local CR_TMP CR_HTTP CR_BODY
+            CR_TMP=$(mktemp)
+            CR_HTTP=$(curl -s -w "%{http_code}" -o "$CR_TMP" \
+              -H "Authorization: token ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "${API_BASE}/repos/${REPO}/commits/${PR_SHA}/check-runs?per_page=100")
+            CR_BODY=$(cat "$CR_TMP"); rm -f "$CR_TMP"
 
-            echo "  CHECK_RAW: ${CHECK_RAW}"
+            if [[ "$CR_HTTP" -ge 400 ]]; then
+              echo "Failed to fetch check runs: HTTP ${CR_HTTP}"
+              CHECK_RESULT="fail"
+              break
+            fi
+
+            # Normalise conclusions to uppercase state values; exclude this workflow's suite
+            local CHECK_RAW
+            CHECK_RAW=$(printf '%s' "$CR_BODY" | jq \
+              --arg suite_id "$CURRENT_SUITE_ID" \
+              'if has("check_runs") then
+                [.check_runs[] |
+                  select((.check_suite.id | tostring) != $suite_id) |
+                  {
+                    name: .name,
+                    state: (
+                      if .status != "completed" then "PENDING"
+                      elif .conclusion == "success" then "SUCCESS"
+                      elif .conclusion == "failure" then "FAILURE"
+                      elif .conclusion == "startup_failure" then "FAILURE"
+                      elif .conclusion == "neutral" then "NEUTRAL"
+                      elif .conclusion == "cancelled" then "CANCELLED"
+                      elif .conclusion == "skipped" then "SKIPPED"
+                      elif .conclusion == "timed_out" then "TIMED_OUT"
+                      elif .conclusion == "action_required" then "ACTION_REQUIRED"
+                      elif .conclusion == "stale" then "NEUTRAL"
+                      else "FAILURE"
+                      end
+                  }
+                ]
+              else [] end')
+
+            # Also include legacy commit statuses (deduplicate by context, keep latest)
+            local ST_TMP ST_RAW
+            ST_TMP=$(mktemp)
+            curl -s -o "$ST_TMP" \
+              -H "Authorization: token ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "${API_BASE}/repos/${REPO}/commits/${PR_SHA}/statuses?per_page=100"
+            ST_RAW=$(jq 'if type == "array" then
+                [group_by(.context)[] | sort_by(.updated_at) | last |
+                  {
+                    name: .context,
+                    state: (
+                      if .state == "success" then "SUCCESS"
+                      elif .state == "failure" then "FAILURE"
+                      elif .state == "error" then "ERROR"
+                      else "PENDING"
+                      end
+                    )
+                  }
+                ]
+              else [] end' "$ST_TMP")
+            rm -f "$ST_TMP"
+
+            local COMBINED_RAW
+            COMBINED_RAW=$(printf '%s\n%s' "$CHECK_RAW" "$ST_RAW" | jq -s 'add')
+
+            CHECK_STATE=$(printf '%s' "$COMBINED_RAW" | jq -r \
+              'if length == 0 then "no_checks"
+               elif any(.state | test("^(FAILURE|ERROR|CANCELLED|ACTION_REQUIRED|TIMED_OUT)$")) then "fail"
+               elif all(.state | test("^(SUCCESS|NEUTRAL|SKIPPED)$")) then "pass"
+               else "pending"
+               end')
+
+            echo "  CHECK_RAW: ${COMBINED_RAW}"
             echo "  ${ELAPSED}s — checks: ${CHECK_STATE}"
 
             [[ "$CHECK_STATE" != "no_checks" ]] && CHECKS_SEEN="true"
@@ -201,7 +283,19 @@ runs:
           # --- 4. Squash merge ---
           echo "::group::Squash merging PR #${PR_NUMBER}"
 
-          if gh pr merge "$PR_NUMBER" --repo "$REPO" --squash --delete-branch; then
+          local MERGE_TMP MERGE_HTTP
+          MERGE_TMP=$(mktemp)
+          MERGE_HTTP=$(curl -s -w "%{http_code}" -o "$MERGE_TMP" \
+            -X PUT \
+            -H "Authorization: token ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            "${API_BASE}/repos/${REPO}/pulls/${PR_NUMBER}/merge" \
+            -d '{"merge_method": "squash"}')
+          rm -f "$MERGE_TMP"
+
+          if [[ "$MERGE_HTTP" -eq 200 ]]; then
+            api DELETE "/repos/${REPO}/git/refs/heads/${BRANCH}" >/dev/null 2>&1 || true
             echo "::endgroup::"
             echo "::notice::PR #${PR_NUMBER} squash merged into ${BASE}"
             echo "result=merged" >> "$GITHUB_OUTPUT"
@@ -213,16 +307,14 @@ runs:
 
         # --- Queue loop: process all labeled PRs in order ---
         # Brief pause to let the label propagate through GitHub's API
-        # (the labeled event can fire before gh pr list sees the label)
+        # (the labeled event can fire before the API sees the label)
         sleep 5
         PROCESSED=""
         EMPTY_RETRIES=0
+        LABEL_ENCODED=$(urlencode "$LABEL")
         while true; do
-          PR_NUMBER=$(gh pr list --repo "$REPO" \
-            --label "$LABEL" \
-            --state open \
-            --json number \
-            --jq '[.[].number] | sort | first // empty')
+          PR_NUMBER=$(api GET "/repos/${REPO}/issues?state=open&labels=${LABEL_ENCODED}&sort=created&direction=asc&per_page=100" | \
+            jq -r '[.[] | select(.pull_request != null) | .number] | sort | first // empty')
 
           if [[ -z "$PR_NUMBER" ]]; then
             if [[ "$EMPTY_RETRIES" -lt 3 ]]; then
@@ -245,7 +337,7 @@ runs:
 
           process_pr "$PR_NUMBER" || {
             # Unexpected failure — remove from queue to avoid infinite loop
-            gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$LABEL" || true
+            api DELETE "/repos/${REPO}/issues/${PR_NUMBER}/labels/${LABEL_ENCODED}" >/dev/null 2>&1 || true
             echo "result=failed" >> "$GITHUB_OUTPUT"
           }
           PROCESSED="$PROCESSED $PR_NUMBER"
