@@ -1,0 +1,102 @@
+name: Automate creating the Release pull request
+description: Automate creating the Release pull request
+inputs:
+  release_version:
+    description: Release version
+    required: true
+  changelog_configuration:
+    description: The changelog configuration file path, e.g., ".github/workflows/config/changelog-release.json"
+    required: true
+    default: ".github/workflows/config/changelog_release.json"
+  github_token:
+    description: The GitHub PAT for this action to use
+    required: false
+    default: ${{ github.token }}
+  base_branch:
+    description: The base branch for the release pull request, e.g., "main"
+    required: false
+    default: main
+  assignee:
+    description: The assignee for the Release pull request, e.g., bot
+    required: false
+  label:
+    description: 'The label for the Release pull request, e.g., "type : release"'
+    required: false
+    default: "type : release"
+  release_body_url:
+    description: The URL to put in the release body. If not set, the GitHub Milestone (= release_version) URL will be used.
+    required: false
+
+runs:
+  using: composite
+  steps:
+    - name: Find the HEAD commit
+      id: find_head_commit
+      shell: bash
+      run: echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+    - name: Find the latest ${{ inputs.base_branch }} commit
+      id: find_latest_base_commit
+      shell: bash
+      run: |
+        git fetch origin ${{ inputs.base_branch }}
+        echo "sha=$(git rev-parse origin/${{ inputs.base_branch }})" >> $GITHUB_OUTPUT
+
+    - name: Generate changelog
+      id: generate_changelog
+      uses: mikepenz/release-changelog-builder-action@348e88fab4c37338b1e803ceb2d4a7a5db6c0833 # mikepenz/release-changelog-builder-action@v6.2.2
+      with:
+        token: ${{ inputs.github_token }}
+        configuration: ${{ inputs.changelog_configuration }}
+        outputFile: body_content.txt
+        fromTag: ${{ steps.find_latest_base_commit.outputs.sha }}
+        toTag: ${{ steps.find_head_commit.outputs.sha }}
+
+    - name: Find milestone
+      id: find_milestone
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+      shell: bash
+      run: |
+        gh extension install valeriobelli/gh-milestone
+        MILESTONE=${{ inputs.release_version }}
+        MILESTONE_URL=$(gh milestone list --query $MILESTONE --json url --jq ".[0].url")
+        echo "milestone=$MILESTONE" >> $GITHUB_OUTPUT
+        echo "milestone_url=$MILESTONE_URL" >> $GITHUB_OUTPUT
+
+    - name: Prepend Release URL into the changelog
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.release_body_url }}" ]; then
+          echo -e "${{ inputs.release_body_url }}\n\n$(cat body_content.txt)" > body_content.txt
+        else
+          echo -e "${{ steps.find_milestone.outputs.milestone_url }}\n\n$(cat body_content.txt)" > body_content.txt
+        fi
+
+    - name: Create the Release pull request
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+      shell: bash
+      run: |
+        RELEASE_BRANCH=release/${{ inputs.release_version }}
+
+        # Create the release branch
+        git checkout -b $RELEASE_BRANCH
+        git push origin $RELEASE_BRANCH -f
+
+        # Add milestone if available
+        if [ -n "${{ steps.find_milestone.outputs.milestone_url }}" ]; then
+          MILESTONE_PARAM="--milestone ${{ steps.find_milestone.outputs.milestone }}"
+        else
+          MILESTONE_PARAM=""
+        fi
+
+        # Create the pull request
+        gh pr create \
+          --base ${{ inputs.base_branch }} \
+          --head $RELEASE_BRANCH \
+          --assignee ${{ inputs.assignee }} \
+          --title "Release - ${{ inputs.release_version }}" \
+          --label "${{ inputs.label }}" \
+          $MILESTONE_PARAM \
+          --body-file body_content.txt \
