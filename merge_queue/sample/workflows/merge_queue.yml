@@ -1,0 +1,27 @@
+# .github/workflows/merge-queue.yml
+name: Merge Queue
+
+on:
+  pull_request:
+    types: [labeled]
+
+# Only one merge at a time — this IS the queue
+concurrency:
+  group: merge-queue
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    if: github.event.label.name == 'mergeme'
+    runs-on: ubuntu-latest
+    permissions:
+      checks: read
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: nimblehq/github-actions-workflows/merge_queue@0.2.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}

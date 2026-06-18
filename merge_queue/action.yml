@@ -1,0 +1,239 @@
+name: "merge-queue"
+description: "A merge queue for GitHub Actions. Label a PR, it rebases, waits for CI, and squash merges."
+author: "nimblehq"
+
+branding:
+  icon: "git-merge"
+  color: "purple"
+
+inputs:
+  github-token:
+    description: "GitHub token with repo permissions"
+    required: true
+    default: ${{ github.token }}
+  label:
+    description: "Label that triggers the merge queue"
+    required: false
+    default: "mergeme"
+  poll-interval:
+    description: "Seconds between status check polls"
+    required: false
+    default: "30"
+  timeout:
+    description: "Max seconds to wait for status checks"
+    required: false
+    default: "1800"
+
+outputs:
+  result:
+    description: "Result of the last PR processed: merged or failed"
+    value: ${{ steps.merge.outputs.result }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Rebase, wait for CI, squash merge
+      id: merge
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        LABEL: ${{ inputs.label }}
+        POLL_INTERVAL: ${{ inputs.poll-interval }}
+        TIMEOUT: ${{ inputs.timeout }}
+      run: |
+        set -euo pipefail
+        REPO="${GITHUB_REPOSITORY}"
+
+        # Remove label, post failure comment, write output
+        dequeue() {
+          local pr="$1" msg="$2"
+          gh pr edit "$pr" --repo "$REPO" --remove-label "$LABEL" 2>/dev/null || true
+          gh pr comment "$pr" --repo "$REPO" --body "$msg" 2>/dev/null || true
+          echo "result=failed" >> "$GITHUB_OUTPUT"
+        }
+
+        # Process one PR through rebase → CI wait → squash merge.
+        # Always returns 0; failures dequeue the PR and return early.
+        process_pr() {
+          local PR_NUMBER="$1"
+
+          # --- 1. Check PR state ---
+          echo "::group::PR #${PR_NUMBER} — checking state"
+
+          local PR_JSON STATE MERGEABLE BRANCH TITLE BASE
+          PR_JSON=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
+            --json state,mergeable,headRefName,title,baseRefName)
+          STATE=$(echo "$PR_JSON" | jq -r '.state')
+          MERGEABLE=$(echo "$PR_JSON" | jq -r '.mergeable')
+          BRANCH=$(echo "$PR_JSON" | jq -r '.headRefName')
+          TITLE=$(echo "$PR_JSON" | jq -r '.title')
+          BASE=$(echo "$PR_JSON" | jq -r '.baseRefName')
+
+          echo "PR: #${PR_NUMBER} — ${TITLE}"
+          echo "Branch: ${BRANCH} → ${BASE}"
+          echo "State: ${STATE} / Mergeable: ${MERGEABLE}"
+          echo "::endgroup::"
+
+          if [[ "$STATE" != "OPEN" ]]; then
+            gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$LABEL" 2>/dev/null || true
+            return 0
+          fi
+
+          if [[ "$MERGEABLE" == "CONFLICTING" ]]; then
+            dequeue "$PR_NUMBER" "**Merge queue:** removed — PR has conflicts with \`${BASE}\`. Resolve and re-label \`${LABEL}\` to retry."
+            return 0
+          fi
+
+          # GitHub computes mergeability asynchronously — poll briefly if UNKNOWN
+          if [[ "$MERGEABLE" == "UNKNOWN" ]]; then
+            local i
+            for i in 1 2 3; do
+              sleep 5
+              MERGEABLE=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json mergeable --jq '.mergeable')
+              echo "  Mergeability retry ${i}: ${MERGEABLE}"
+              [[ "$MERGEABLE" != "UNKNOWN" ]] && break
+            done
+            if [[ "$MERGEABLE" == "CONFLICTING" ]]; then
+              dequeue "$PR_NUMBER" "**Merge queue:** removed — PR has conflicts with \`${BASE}\`. Resolve and re-label \`${LABEL}\` to retry."
+              return 0
+            fi
+          fi
+
+          # --- 2. Rebase onto latest base branch ---
+          echo "::group::Rebasing ${BRANCH} onto ${BASE}"
+
+          # Configure git identity for rebase commits
+          git config user.email "nimblehq-merge-queue[bot]@users.noreply.github.com"
+          git config user.name "nimblehq-merge-queue[bot]"
+
+          git fetch origin "$BASE" "$BRANCH"
+          git checkout -B "$BRANCH" "origin/$BRANCH"
+
+          if ! git rebase "origin/$BASE"; then
+            git rebase --abort
+            echo "::endgroup::"
+            dequeue "$PR_NUMBER" "**Merge queue:** rebase onto \`${BASE}\` failed due to conflicts. Resolve and re-label \`${LABEL}\` to retry."
+            return 0
+          fi
+
+          # Push directly to token URL to ensure the PAT is used (not GITHUB_TOKEN
+          # from checkout). PAT pushes trigger workflows; GITHUB_TOKEN pushes don't.
+          local PUSH_URL="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          if ! git push "$PUSH_URL" "$BRANCH" --force-with-lease; then
+            echo "::endgroup::"
+            dequeue "$PR_NUMBER" "**Merge queue:** failed to push rebased branch. Re-label \`${LABEL}\` to retry."
+            return 0
+          fi
+
+          echo "Rebased ${BRANCH} onto latest ${BASE}"
+          echo "::endgroup::"
+
+          # --- 3. Wait for status checks ---
+          echo "::group::Waiting for status checks on PR #${PR_NUMBER}"
+
+          local ELAPSED=0 CHECK_RESULT="pending" CHECK_STATE CHECKS_SEEN="false"
+          # Grace period: wait at least this long before treating "no checks" as
+          # a pass, giving CI workflows time to register check runs on the new commit.
+          local GRACE=60
+          while true; do
+            sleep "$POLL_INTERVAL"
+            ELAPSED=$((ELAPSED + POLL_INTERVAL))
+
+            # gh pr checks exits 1 when no checks exist — fall back to empty array
+            local CHECK_RAW
+            CHECK_RAW=$(gh pr checks "$PR_NUMBER" --repo "$REPO" --json name,state,workflow 2>/dev/null || echo "[]")
+            CHECK_STATE=$(echo "$CHECK_RAW" | jq -r \
+              --arg workflow "$GITHUB_WORKFLOW" \
+              '[.[] | select(.workflow != $workflow)] | if length == 0 then "no_checks" elif any(.state | test("^(FAILURE|ERROR|CANCELLED|ACTION_REQUIRED)$")) then "fail" elif all(.state | test("^(SUCCESS|NEUTRAL|SKIPPED)$")) then "pass" else "pending" end')
+
+            echo "  CHECK_RAW: ${CHECK_RAW}"
+            echo "  ${ELAPSED}s — checks: ${CHECK_STATE}"
+
+            [[ "$CHECK_STATE" != "no_checks" ]] && CHECKS_SEEN="true"
+
+            if [[ "$CHECK_STATE" == "pass" ]]; then
+              CHECK_RESULT="pass"
+              echo "All checks passed."
+              break
+            fi
+
+            if [[ "$CHECK_STATE" == "no_checks" && ( "$CHECKS_SEEN" == "true" || "$ELAPSED" -ge "$GRACE" ) ]]; then
+              CHECK_RESULT="pass"
+              echo "No status checks configured — proceeding."
+              break
+            fi
+
+            if [[ "$CHECK_STATE" == "fail" ]]; then
+              CHECK_RESULT="fail"
+              break
+            fi
+
+            if [[ "$ELAPSED" -ge "$TIMEOUT" ]]; then
+              CHECK_RESULT="timeout"
+              break
+            fi
+          done
+          echo "::endgroup::"
+
+          if [[ "$CHECK_RESULT" == "fail" ]]; then
+            dequeue "$PR_NUMBER" "**Merge queue:** status checks failed after rebase onto \`${BASE}\`. Fix and re-label \`${LABEL}\` to retry."
+            return 0
+          fi
+
+          if [[ "$CHECK_RESULT" == "timeout" ]]; then
+            dequeue "$PR_NUMBER" "**Merge queue:** timed out waiting for status checks (${TIMEOUT}s). Re-label \`${LABEL}\` to retry."
+            return 0
+          fi
+
+          # --- 4. Squash merge ---
+          echo "::group::Squash merging PR #${PR_NUMBER}"
+
+          if gh pr merge "$PR_NUMBER" --repo "$REPO" --squash --delete-branch; then
+            echo "::endgroup::"
+            echo "::notice::PR #${PR_NUMBER} squash merged into ${BASE}"
+            echo "result=merged" >> "$GITHUB_OUTPUT"
+          else
+            echo "::endgroup::"
+            dequeue "$PR_NUMBER" "**Merge queue:** squash merge failed. This can happen if branch protection rules are not met. Fix and re-label \`${LABEL}\` to retry."
+          fi
+        }
+
+        # --- Queue loop: process all labeled PRs in order ---
+        # Brief pause to let the label propagate through GitHub's API
+        # (the labeled event can fire before gh pr list sees the label)
+        sleep 5
+        PROCESSED=""
+        EMPTY_RETRIES=0
+        while true; do
+          PR_NUMBER=$(gh pr list --repo "$REPO" \
+            --label "$LABEL" \
+            --state open \
+            --json number \
+            --jq '[.[].number] | sort | first // empty')
+
+          if [[ -z "$PR_NUMBER" ]]; then
+            if [[ "$EMPTY_RETRIES" -lt 3 ]]; then
+              EMPTY_RETRIES=$((EMPTY_RETRIES + 1))
+              echo "Queue appears empty, retrying in 5s... (${EMPTY_RETRIES}/3)"
+              sleep 5
+              continue
+            fi
+            echo "Queue empty."
+            break
+          fi
+          EMPTY_RETRIES=0
+
+          # Skip PRs already processed (label removal may not have propagated)
+          if [[ " $PROCESSED " == *" $PR_NUMBER "* ]]; then
+            echo "PR #${PR_NUMBER} already processed, waiting for label removal to propagate..."
+            sleep 5
+            continue
+          fi
+
+          process_pr "$PR_NUMBER" || {
+            # Unexpected failure — remove from queue to avoid infinite loop
+            gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$LABEL" || true
+            echo "result=failed" >> "$GITHUB_OUTPUT"
+          }
+          PROCESSED="$PROCESSED $PR_NUMBER"
+        done
